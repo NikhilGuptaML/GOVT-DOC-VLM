@@ -11,7 +11,7 @@ govt-doc-vlm/
 │   │   ├── config.py         ← ONLY file that differs between folders
 │   │   ├── main.py           ← FastAPI app
 │   │   ├── pdf_processor.py  ← PDF → images
-│   │   ├── model_client.py   ← calls real Qwen model
+│   │   ├── model_client.py   ← calls local Qwen model via plain HTTP (no cloud)
 │   │   ├── mock_client.py    ← fake output for laptop testing
 │   │   └── requirements.txt
 │   ├── frontend/             ← React + Vite app
@@ -30,7 +30,7 @@ govt-doc-vlm/
 | File | 27B | 122B |
 |---|---|---|
 | `config.py` MODEL_NAME | `Qwen/Qwen3.5-27B-FP8` | `Qwen/Qwen3.5-122B-A10B` |
-| `config.py` BACKEND_PORT | `8001` | `8002` |
+| `config.py` BACKEND_PORT | `8001` (reference only) | `8002` (reference only) |
 | `start_model.sh` | loads 27B | loads 122B |
 | Everything else | identical | identical |
 
@@ -49,10 +49,12 @@ govt-doc-vlm/
 ```bash
 # Backend
 cd doc-qwen3.5-27b/backend
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --port 8001 --reload
+python -m uvicorn main:app --port 8001 --reload
+# ⚠️  Always use 'python -m uvicorn' NOT 'uvicorn' directly
+# 'uvicorn' alone uses system Python and can't see venv packages
 
 # Frontend (new terminal)
 cd doc-qwen3.5-27b/frontend
@@ -60,17 +62,18 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 — upload a PDF, mock output appears. Full flow works.
+Open http://localhost:5173 — upload a PDF, real page images show + mock text below. Full flow works.
 
 ---
 
 ## Step 2 — GPU Workstation Setup (real model)
 
 ```bash
-# 1. Install GPU libraries
+# 1. Install GPU libraries (on GPU machine only)
 pip install torch --index-url https://download.pytorch.org/whl/cu124
 pip install "transformers[serving] @ git+https://github.com/huggingface/transformers.git@main"
-pip install torchvision pillow accelerate huggingface_hub
+pip install torchvision accelerate huggingface_hub
+# Note: pillow, httpx already installed via requirements.txt — no openai needed
 
 # 2. Start model server (downloads model on first run)
 cd doc-qwen3.5-27b
@@ -80,7 +83,8 @@ bash start_model.sh
 
 # 4. Start backend
 cd backend
-uvicorn main:app --port 8001 --reload
+python -m uvicorn main:app --port 8001 --reload
+# ⚠️  Always use 'python -m uvicorn' NOT 'uvicorn' directly
 
 # 5. Start frontend
 cd ../frontend
@@ -107,3 +111,29 @@ Downloaded once. Loaded from cache on every run after.
 huggingface-cli download Qwen/Qwen3.5-27B-FP8
 huggingface-cli download Qwen/Qwen3.5-122B-A10B
 ```
+
+---
+
+## No cloud dependencies
+
+This project calls **no external APIs**. Everything runs locally:
+
+```
+React UI → FastAPI backend → httpx POST → localhost:8000 → Qwen model on GPU
+```
+
+`model_client.py` uses plain `httpx` (comes with FastAPI) to call the local
+model server. No `openai` package, no API keys, no internet required at runtime.
+
+---
+
+## Common errors
+
+| Error | Cause | Fix |
+|---|---|---|
+| `No module named 'pymupdf'` | Running `uvicorn` instead of `python -m uvicorn` | Use `python -m uvicorn main:app --port 8001 --reload` |
+| `No module named 'fitz'` | Same as above | Same fix |
+| Images not showing | PyMuPDF import failing silently | Same fix — always `python -m uvicorn` |
+| `ModuleNotFoundError` on any package | Wrong Python / venv not active | Run `source venv/bin/activate` first |
+| `[CONNECTION ERROR]` in extracted text | Model server not running | Run `bash start_model.sh` first, then start backend |
+| `[TIMEOUT]` in extracted text | Page image too large | Lower `PDF_DPI` in `config.py` from 200 to 150 |

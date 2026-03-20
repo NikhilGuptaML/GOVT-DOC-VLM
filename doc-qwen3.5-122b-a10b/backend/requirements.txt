@@ -7,8 +7,8 @@ python-multipart
 pymupdf
 pillow
 
-# ── Model client (used only on GPU machine) ────────────────
-openai
+# ── Model client HTTP (used only on GPU machine) ──────────
+# httpx already installed as fastapi dependency — no extra install needed
 
 # ── GPU machine only — install these on workstation ────────
 # torch --index-url https://download.pytorch.org/whl/cu124
