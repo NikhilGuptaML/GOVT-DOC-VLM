@@ -1,0 +1,18 @@
+# ── Core backend ──────────────────────────────────────────
+fastapi
+uvicorn[standard]
+python-multipart
+
+# ── PDF processing ─────────────────────────────────────────
+pymupdf
+pillow
+
+# ── Model client (used only on GPU machine) ────────────────
+openai
+
+# ── GPU machine only — install these on workstation ────────
+# torch --index-url https://download.pytorch.org/whl/cu124
+# transformers[serving] @ git+https://github.com/huggingface/transformers.git@main
+# torchvision
+# accelerate
+# huggingface_hub
