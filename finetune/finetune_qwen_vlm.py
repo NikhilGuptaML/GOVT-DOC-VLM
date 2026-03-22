@@ -6,6 +6,15 @@ Supports:
   • Qwen3.5-VL-27B   (dense, bf16 LoRA)       on A100 80GB
   • Qwen3.5-VL-122B-A10B (sparse MoE, QLoRA)  on A100 80GB
 
+Thinking mode:
+  enable_thinking=True is kept ON during both training and inference.
+  Training data MUST include <think>...</think> blocks in the assistant
+  target output for ambiguous cases (unclear handwriting, overlapping
+  fields, damaged scans).  At inference time, the model generates think
+  blocks first, then the structured extraction.  Post-processing strips
+  the <think>...</think> content before parsing structured fields —
+  amounts, dates, headers are parsed ONLY from content AFTER </think>.
+
 Usage:
   python finetune_qwen_vlm.py --model_variant 27b --data_path data.jsonl --output_dir ./ckpt
   python finetune_qwen_vlm.py --model_variant 122b --data_path data.jsonl --output_dir ./ckpt
@@ -111,6 +120,45 @@ LORA_TARGET_MODULES = [
     # Vision-specific projection (Qwen3.5-VL merges vision via this)
     "visual",
 ]
+
+# ────────────────────────────────────────────────────────────
+#  Thinking mode — Qwen3.5 enable_thinking=True
+# ────────────────────────────────────────────────────────────
+# keep thinking ON during both training AND inference.
+# Training data must include <think>...</think> blocks in the
+# assistant's target output for ambiguous cases.  During eval /
+# inference, structured output (amounts, dates, headers) is parsed
+# ONLY from content AFTER the closing </think> tag.
+ENABLE_THINKING = True
+
+
+def strip_think_blocks(text: str) -> str:
+    """
+    Remove <think>...</think> blocks from model output.
+
+    Qwen3.5 with enable_thinking=True emits reasoning traces wrapped
+    in <think>...</think> tags before the actual structured extraction.
+    For metric computation we need the clean extraction only — the
+    think blocks are internal chain-of-thought, not part of the
+    deliverable output.
+
+    Handles:
+      - Single or multiple think blocks
+      - Multiline content inside think tags
+      - Nested or malformed tags (greedy strip to be safe)
+
+    Post-processing note for inference pipeline integration:
+      When deploying the finetuned model in the inference backend
+      (model_client.py), apply this function to the raw model output
+      BEFORE returning structured text to the frontend.  The think
+      blocks contain useful reasoning but should NOT appear in the
+      user-facing extracted document content.
+    """
+    # re.DOTALL so '.' matches newlines inside think blocks
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Strip leading whitespace/newlines left after removal
+    cleaned = cleaned.strip()
+    return cleaned
 
 
 # ════════════════════════════════════════════════════════════
@@ -227,6 +275,19 @@ class GovtDocDataset(Dataset):
             {"role": "assistant", "content": "<ground_truth_extraction>"}
         ]
     }
+
+    THINKING MODE: The assistant content in training data MUST include
+    <think>...</think> blocks for ambiguous cases.  Example:
+
+        "content": "<think>The handwritten amount is partially obscured.
+        The first digit could be 4 or 9. Cross-referencing with the
+        printed total in the table row above, 4 is consistent.</think>
+        Rs. 4,51,800/- (Rupees Four Lakh ...)"
+
+    The model learns to reason through ambiguity before committing to
+    an extraction.  During evaluation, think blocks are stripped via
+    strip_think_blocks() before computing metrics — only the final
+    structured output is scored.
 
     The processor handles tokenization + image preprocessing internally
     (Qwen3.5-VL uses its own image processor — we don't manually normalise).
@@ -865,16 +926,30 @@ def run_evaluation(
                 max_new_tokens=2048,
                 temperature=0.1,
                 do_sample=False,
+                # Thinking mode: let the model reason through ambiguous
+                # content (unclear handwriting, damaged scans) before
+                # producing structured output.  The <think> block is
+                # stripped in post-processing before metric computation.
+                enable_thinking=ENABLE_THINKING,
             )
 
         # Decode only the generated tokens (strip input)
         gen_ids = output_ids[0][inputs["input_ids"].shape[-1]:]
-        prediction = processor.decode(gen_ids, skip_special_tokens=True)
+        raw_prediction = processor.decode(gen_ids, skip_special_tokens=True)
+
+        # ── Post-processing: strip think blocks ───
+        # The model emits <think>reasoning...</think> before the
+        # actual extraction.  Metrics must be computed on the clean
+        # structured output only — not on the reasoning trace.
+        prediction = strip_think_blocks(raw_prediction)
+        # Also strip think blocks from reference, because training
+        # data includes them in the target completion.
+        clean_reference = strip_think_blocks(reference)
 
         # ── Compute metrics ───────────────────────
-        cer = compute_cer(prediction, reference)
-        field_metrics = compute_field_f1(prediction, reference)
-        table_acc = compute_table_cell_accuracy(prediction, reference)
+        cer = compute_cer(prediction, clean_reference)
+        field_metrics = compute_field_f1(prediction, clean_reference)
+        table_acc = compute_table_cell_accuracy(prediction, clean_reference)
 
         all_cer.append(cer)
         all_f1.append(field_metrics["f1"])
