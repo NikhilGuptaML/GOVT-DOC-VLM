@@ -7,12 +7,10 @@ python-multipart
 pymupdf
 pillow
 
-# ── Model client HTTP (used only on GPU machine) ──────────
-# httpx already installed as fastapi dependency — no extra install needed
+# ── GGUF inference (llama.cpp) ─────────────────────────────
+# CUDA build required for GPU acceleration:
+#   CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
+llama-cpp-python>=0.3.0
 
-# ── GPU machine only — install these on workstation ────────
-# torch --index-url https://download.pytorch.org/whl/cu124
-# transformers[serving] @ git+https://github.com/huggingface/transformers.git@main
-# torchvision
-# accelerate
-# huggingface_hub
+# ── Model download tool ───────────────────────────────────
+huggingface_hub
