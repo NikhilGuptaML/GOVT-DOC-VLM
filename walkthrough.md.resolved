@@ -1,0 +1,78 @@
+# Walkthrough — llama.cpp GGUF Inference Migration
+
+## Changes Made
+
+### New File
+| File | Lines | Purpose |
+|------|-------|---------|
+| [inference_gguf.py](file:///c:/Dev/Internship/GOVT-DOC-VLM/finetune/inference_gguf.py) | ~310 | Standalone GGUF inference via llama-cpp-python |
+
+**Key sections in [inference_gguf.py](file:///c:/Dev/Internship/GOVT-DOC-VLM/finetune/inference_gguf.py):**
+- **§1 Model Loading** — `Llama()` with `n_gpu_layers=-1`, `n_ctx=2048`, `Llava15ChatHandler` for vision
+- **§2 Image Encoding** — base64 data URI with MIME detection
+- **§3 Inference** — `create_chat_completion()` with multimodal messages + `/no_think` system prompt
+- **§4 Sanity Check** — hardcoded test run, prints raw output
+- **§5 CLI** — `--model_path`, `--mmproj_path`, `--image_path`, `--n_ctx`, `--n_gpu_layers`
+
+### Modified File
+
+```diff:requirements_finetune.txt
+# ── Finetuning dependencies (GPU workstation only) ─────────
+# Install: pip install -r requirements_finetune.txt
+
+torch>=2.1.0
+transformers>=4.45.0
+peft>=0.12.0
+bitsandbytes>=0.43.0
+accelerate>=0.33.0
+datasets
+pillow
+tqdm
+editdistance
+===
+# ── Finetuning dependencies (GPU workstation only) ─────────
+# Install: pip install -r requirements_finetune.txt
+
+torch>=2.1.0
+transformers>=4.45.0
+peft>=0.12.0
+bitsandbytes>=0.43.0
+accelerate>=0.33.0
+datasets
+pillow
+tqdm
+editdistance
+# ── GGUF local inference (llama.cpp) ───────────────────────
+# CUDA build required for GPU acceleration:
+#   CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
+llama-cpp-python>=0.3.0
+```
+
+### Untouched
+- [finetune_qwen_vlm.py](file:///c:/Dev/Internship/GOVT-DOC-VLM/finetune/finetune_qwen_vlm.py) — all LoRA/training code preserved exactly
+
+## Verification
+
+| Check | Result |
+|-------|--------|
+| `py_compile inference_gguf.py` | ✅ Passed |
+| `git diff finetune_qwen_vlm.py` | ✅ No changes |
+| `git status finetune/` | ✅ Only new file + modified requirements |
+
+## Next Steps (GPU Workstation)
+
+```bash
+# 1. Install llama-cpp-python with CUDA
+CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
+
+# 2. Download model files (~17GB total)
+huggingface-cli download unsloth/Qwen3.5-VL-27B-GGUF Qwen3.5-VL-27B-Q4_K_M.gguf --local-dir ./models
+huggingface-cli download unsloth/Qwen3.5-VL-27B-GGUF mmproj-BF16.gguf --local-dir ./models
+
+# 3. Run sanity check
+cd finetune
+python inference_gguf.py \
+  --model_path ../models/Qwen3.5-VL-27B-Q4_K_M.gguf \
+  --mmproj_path ../models/mmproj-BF16.gguf \
+  --image_path <any_document_image.png>
+```
