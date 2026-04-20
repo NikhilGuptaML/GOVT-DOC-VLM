@@ -42,13 +42,13 @@ const styles = {
   },
 }
 
-export default function UploadZone({ onUpload, loading }) {
+export default function UploadZone({ onUpload, loading, statusText }) {
   const inputRef = useRef()
   const [hover, setHover] = useState(false)
   const [fileName, setFileName] = useState(null)
 
   function handleFile(file) {
-    if (!file || !file.name.endsWith('.pdf')) return
+    if (!file || !file.name.toLowerCase().endsWith('.pdf')) return
     setFileName(file.name)
     onUpload(file)
   }
@@ -76,7 +76,7 @@ export default function UploadZone({ onUpload, loading }) {
       />
       <p style={styles.label}>
         {loading
-          ? `⏳ Processing ${fileName || 'document'}...`
+          ? (statusText || `⏳ Processing ${fileName || 'document'}...`)
           : fileName
           ? `✓ ${fileName}`
           : 'Drop a PDF here or click to upload'}

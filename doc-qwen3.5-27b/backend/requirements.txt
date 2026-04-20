@@ -7,10 +7,6 @@ python-multipart
 pymupdf
 pillow
 
-# ── GGUF inference (llama.cpp) ─────────────────────────────
-# CUDA build required for GPU acceleration:
-#   CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
-llama-cpp-python>=0.3.0
-
-# ── Model download tool ───────────────────────────────────
-huggingface_hub
+# ── HF inference client ────────────────────────────────────
+openai>=1.0.0
+python-dotenv

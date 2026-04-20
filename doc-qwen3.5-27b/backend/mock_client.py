@@ -1,15 +1,15 @@
 import time
 
 
-def process_image(image_path: str, page_number: int) -> str:
+def process_image(image_path: str, page_number: int) -> dict:
     """
     MOCK CLIENT — used on laptop for UI/flow testing.
     No model needed. Returns fake structured output.
     Switch to model_client.py on GPU machine by setting USE_MOCK=False in config.py
     """
-    time.sleep(1.5)  # simulate model thinking time
+    time.sleep(1.0)  # simulate model latency
 
-    return f"""## Page {page_number} — Mock Output
+    extracted_text = f"""## Page {page_number} — Mock Output
 
 **[This is a mock response. Real model output will appear here on GPU machine.]**
 
@@ -47,3 +47,16 @@ This area will show actual OCR/VLM output once running on GPU machine with real 
 *Image path processed: `{image_path}`*
 *Replace mock_client with model_client in main.py when ready.*
 """
+
+    reasoning_text = (
+        f"[MOCK THINKING] Page {page_number}:\n"
+        "1. Detected a scanned document layout with heading and table-like blocks.\n"
+        "2. Reconstructed visible fields into markdown structures.\n"
+        "3. Kept output deterministic for local testing workflows."
+    )
+
+    return {
+        "extracted_text": extracted_text,
+        "reasoning_text": reasoning_text,
+        "error": None,
+    }

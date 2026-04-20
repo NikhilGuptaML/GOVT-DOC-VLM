@@ -1,132 +1,54 @@
-"""
-model_client.py — Local GGUF inference via llama-cpp-python
-===========================================================
-Loads Qwen3.5-VL-27B GGUF model in-process (no separate model server).
-Replaces the old HTTP-to-transformers-serve approach.
-
-Install (CUDA required for GPU acceleration):
-  CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
-"""
+"""Hugging Face inference client for page-level document extraction."""
 
 import base64
 import os
-import sys
+import re
 import time
 from pathlib import Path
 
+from openai import APIConnectionError, APITimeoutError, BadRequestError, OpenAI, RateLimitError
+
 from config import (
-    MODEL_GGUF_PATH,
-    MMPROJ_GGUF_PATH,
-    N_GPU_LAYERS,
-    N_CTX,
-    MAX_NEW_TOKENS,
+        HF_BASE_URL,
+        HF_ENABLE_THINKING,
+        HF_MAX_TOKENS,
+        HF_MODEL_ID,
+        HF_TEMPERATURE,
+        HF_TIMEOUT_SECONDS,
+        get_hf_token,
 )
 
 # ════════════════════════════════════════════════════════════
 #  SYSTEM PROMPT
 # ════════════════════════════════════════════════════════════
-# /no_think disables Qwen3.5's internal thinking mode — keeps
-# output clean (no <think>...</think> reasoning traces) and
-# saves tokens during extraction.
 SYSTEM_PROMPT = (
-    "You are a document reconstruction expert. "
-    "Analyze this scanned government document page image and extract ALL "
-    "content with exact structure preserved.\n\n"
+    "You are a document reconstruction expert. Analyze this scanned government "
+    "document page image and extract all content with exact structure preserved.\n\n"
     "Output requirements:\n"
-    "- Reproduce all text exactly as it appears, preserving reading order\n"
-    "- Reconstruct all tables in markdown table format with all rows and columns\n"
-    "- Preserve section headings, sub-headings, numbering\n"
-    "- For handwritten content: transcribe exactly, mark unclear parts as [UNCLEAR]\n"
-    "- For Hindi/mixed text: transcribe in the original script, do not translate\n"
-    "- Do NOT add any commentary, explanations or summaries\n"
-    "- Output ONLY the reconstructed document content\n\n"
-    "Begin reconstruction: /no_think"
+    "- Preserve original reading order\n"
+    "- Reconstruct tables in markdown format with all rows and columns\n"
+    "- Preserve headings, labels, numbering, and formatting signals\n"
+    "- For handwritten text, transcribe exactly and mark uncertain spans as [UNCLEAR]\n"
+    "- For Hindi or mixed-language text, keep original script (no translation)\n"
+    "- Keep final answer focused on reconstructed content only\n\n"
+    "You may reason in <think>...</think> before the final answer."
 )
 
-# ════════════════════════════════════════════════════════════
-#  MODEL LOADING — runs once at import time
-# ════════════════════════════════════════════════════════════
-# The model is loaded as a module-level singleton so main.py
-# only pays the load cost once at startup, not per-request.
-
-_model = None  # lazy-loaded on first call or at import
+_client = None
+_THINK_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
 
 
-def _load_model():
-    """Load GGUF model with vision support via llama-cpp-python."""
-    global _model
+def _get_client() -> OpenAI:
+    global _client
+    if _client is not None:
+        return _client
 
-    try:
-        from llama_cpp import Llama
-        from llama_cpp.llama_chat_format import Llava15ChatHandler
-    except ImportError:
-        print(
-            "❌ llama-cpp-python is not installed.\n"
-            "   Install with CUDA support:\n"
-            '   CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python'
-        )
-        sys.exit(1)
+    token = get_hf_token()
+    if not token:
+        raise RuntimeError("HF_TOKEN is not configured")
 
-    # Resolve paths relative to this file's directory
-    base_dir = Path(__file__).parent
-    model_path = str((base_dir / MODEL_GGUF_PATH).resolve())
-    mmproj_path = str((base_dir / MMPROJ_GGUF_PATH).resolve())
-
-    # ── Validate model files exist ────────────────────────
-    if not os.path.isfile(model_path):
-        print(
-            f"❌ Model file not found: {model_path}\n"
-            f"   Download with:\n"
-            f"   huggingface-cli download unsloth/Qwen3.5-VL-27B-GGUF "
-            f"Qwen3.5-VL-27B-Q4_K_M.gguf --local-dir ../models"
-        )
-        sys.exit(1)
-
-    # ── Set up vision handler ─────────────────────────────
-    # mmproj (multimodal projector) encodes images into embeddings
-    # that the LLM can understand.  Without it, text-only mode.
-    chat_handler = None
-    if os.path.isfile(mmproj_path):
-        print(f"📷 Loading vision projector: {mmproj_path}")
-        chat_handler = Llava15ChatHandler(clip_model_path=mmproj_path)
-    else:
-        print(
-            f"⚠️  Vision projector not found: {mmproj_path}\n"
-            f"   Running in TEXT-ONLY mode (images will be ignored).\n"
-            f"   Download with:\n"
-            f"   huggingface-cli download unsloth/Qwen3.5-VL-27B-GGUF "
-            f"mmproj-BF16.gguf --local-dir ../models"
-        )
-
-    # ── Load GGUF model ───────────────────────────────────
-    model_size_gb = os.path.getsize(model_path) / (1024 ** 3)
-    print(
-        f"🔄 Loading GGUF model: {Path(model_path).name} "
-        f"({model_size_gb:.1f} GB)\n"
-        f"   n_gpu_layers={N_GPU_LAYERS}  n_ctx={N_CTX}"
-    )
-
-    start = time.time()
-    _model = Llama(
-        model_path=model_path,
-        n_ctx=N_CTX,
-        n_gpu_layers=N_GPU_LAYERS,
-        # verbose=True shows per-layer GPU/CPU offloading stats
-        verbose=True,
-        chat_handler=chat_handler,
-    )
-    elapsed = time.time() - start
-    print(f"✅ Model loaded in {elapsed:.1f}s")
-
-    return _model
-
-
-def _get_model():
-    """Get or lazily load the model singleton."""
-    global _model
-    if _model is None:
-        _load_model()
-    return _model
+    _client = OpenAI(api_key=token, base_url=HF_BASE_URL)
+    return _client
 
 
 # ════════════════════════════════════════════════════════════
@@ -134,7 +56,7 @@ def _get_model():
 # ════════════════════════════════════════════════════════════
 
 def _encode_image(image_path: str) -> str:
-    """Read image file → base64 data URI for llama.cpp multimodal input."""
+    """Read image file and convert it to a base64 data URI."""
     with open(image_path, "rb") as f:
         raw = f.read()
 
@@ -153,29 +75,90 @@ def _encode_image(image_path: str) -> str:
     return f"data:{mime_type};base64,{b64_data}"
 
 
+def _normalize_text_content(content) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+        return "\n".join(parts).strip()
+    return str(content)
+
+
+def _extract_reasoning_and_answer(content_text: str, reasoning_field: str | None = None) -> tuple[str, str]:
+    if reasoning_field and reasoning_field.strip():
+        return reasoning_field.strip(), content_text.strip()
+
+    matches = _THINK_RE.findall(content_text)
+    if not matches:
+        return "", content_text.strip()
+
+    reasoning = "\n\n".join(chunk.strip() for chunk in matches if chunk.strip())
+    answer = _THINK_RE.sub("", content_text).strip()
+    return reasoning, answer
+
+
+def _format_error(page_number: int, message: str) -> dict:
+    clean = message.strip() if message else "Unknown inference error"
+    return {
+        "extracted_text": f"[Page {page_number} ERROR]: {clean}",
+        "reasoning_text": "",
+        "error": clean,
+    }
+
+
+def _chat_completion(client: OpenAI, messages: list[dict]):
+    request_kwargs = {
+        "model": HF_MODEL_ID,
+        "messages": messages,
+        "max_tokens": HF_MAX_TOKENS,
+        "temperature": HF_TEMPERATURE,
+    }
+
+    if HF_ENABLE_THINKING:
+        request_kwargs["extra_body"] = {
+            "chat_template_kwargs": {"enable_thinking": True}
+        }
+
+    try:
+        return client.with_options(timeout=HF_TIMEOUT_SECONDS).chat.completions.create(**request_kwargs)
+    except BadRequestError as exc:
+        # Some providers reject chat_template_kwargs; retry once without it.
+        if "extra_body" in request_kwargs:
+            request_kwargs.pop("extra_body")
+            return client.with_options(timeout=HF_TIMEOUT_SECONDS).chat.completions.create(**request_kwargs)
+        raise exc
+
+
 # ════════════════════════════════════════════════════════════
 #  INFERENCE — called by main.py for each page
 # ════════════════════════════════════════════════════════════
 
-def process_image(image_path: str, page_number: int) -> str:
+def process_image(image_path: str, page_number: int) -> dict:
     """
-    Run GGUF inference on a document page image.
-    Called by main.py — same signature as the old HTTP-based client.
-    No external server needed — model runs in-process.
+    Run HF inference on a single document page.
+    Returns extracted text and optional reasoning text.
     """
-    model = _get_model()
+    try:
+        client = _get_client()
+    except Exception as exc:
+        return _format_error(page_number, str(exc))
 
-    # Warn if image very large — slows inference
+    # Large images can trigger provider payload limits.
     size_mb = os.path.getsize(image_path) / (1024 * 1024)
     if size_mb > 3:
         print(
             f"⚠️  Page {page_number} image is {size_mb:.1f}MB "
-            f"— consider lowering PDF_DPI in config.py"
+            "— consider lowering PDF_DPI in config.py"
         )
 
-    # ── Build multimodal messages ─────────────────────────
     data_uri = _encode_image(image_path)
-
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
@@ -187,42 +170,46 @@ def process_image(image_path: str, page_number: int) -> str:
                 },
                 {
                     "type": "text",
-                    "text": (
-                        "Extract all content from this government document page. "
-                        "Preserve tables in markdown format, transcribe handwritten "
-                        "amounts exactly, mark unclear parts as [UNCLEAR]."
-                    ),
+                    "text": "Extract and reconstruct this page faithfully.",
                 },
             ],
         },
     ]
 
-    # ── Run inference ─────────────────────────────────────
     try:
         start = time.time()
-        response = model.create_chat_completion(
-            messages=messages,
-            max_tokens=MAX_NEW_TOKENS,
-            temperature=0.1,
-        )
+        response = _chat_completion(client, messages)
         elapsed = time.time() - start
 
-        content = response["choices"][0]["message"]["content"]
+        choice = response.choices[0] if response.choices else None
+        message = getattr(choice, "message", None)
+        content_text = _normalize_text_content(getattr(message, "content", ""))
+        reasoning_field = _normalize_text_content(getattr(message, "reasoning_content", ""))
+        reasoning_text, extracted_text = _extract_reasoning_and_answer(content_text, reasoning_field)
 
-        # Log inference stats
-        usage = response.get("usage", {})
+        usage = getattr(response, "usage", None)
         print(
             f"   Page {page_number}: {elapsed:.1f}s "
-            f"(prompt={usage.get('prompt_tokens', '?')}, "
-            f"completion={usage.get('completion_tokens', '?')} tokens)"
+            f"(prompt={getattr(usage, 'prompt_tokens', '?')}, "
+            f"completion={getattr(usage, 'completion_tokens', '?')} tokens)"
         )
 
-        if not content or not content.strip():
-            return (
-                f"[Page {page_number}: Model returned empty response — try again]"
-            )
+        if not extracted_text:
+            return _format_error(page_number, "Model returned empty response")
 
-        return content
+        return {
+            "extracted_text": extracted_text,
+            "reasoning_text": reasoning_text,
+            "error": None,
+        }
 
-    except Exception as e:
-        return f"[Page {page_number} ERROR]: {str(e)}"
+    except APITimeoutError:
+        return _format_error(page_number, "Request timed out while waiting for Hugging Face")
+    except RateLimitError:
+        return _format_error(page_number, "Rate limit reached on Hugging Face provider")
+    except APIConnectionError:
+        return _format_error(page_number, "Failed to connect to Hugging Face API")
+    except BadRequestError as exc:
+        return _format_error(page_number, f"Bad request to Hugging Face: {str(exc)}")
+    except Exception as exc:
+        return _format_error(page_number, str(exc))
